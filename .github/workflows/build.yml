@@ -32,12 +32,24 @@ on:
         description: "Build without layer cache (use after security fixes)"
         type: boolean
         default: false
+  # Called by rebuild.yml for images whose base image has changed.
+  workflow_call:
+    inputs:
+      versions:
+        type: string
+        default: ""
+      push:
+        type: boolean
+        default: false
+      no_cache:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -70,7 +82,7 @@ jobs:
       # Image name with the registry host, e.g. registry.example.com/php.
       # Without a host it is Docker Hub (narel/php).
       REGISTRY: ${{ vars.REGISTRY || 'narel/php' }}
-      PUSH: ${{ github.event_name == 'workflow_dispatch' && inputs.push && '1' || '' }}
+      PUSH: ${{ inputs.push && '1' || '' }}
       NO_CACHE: ${{ inputs.no_cache && '1' || '' }}
     steps:
       - uses: actions/checkout@v4

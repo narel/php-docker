@@ -1,0 +1,65 @@
+name: Rebuild on base image update
+
+# Every day, compare the digest of each image's base image with the one
+# recorded in the pushed image (label org.opencontainers.image.base.digest).
+# Rebuild and push only the versions whose base image has changed. An image
+# without the label (pushed before it existed) is rebuilt too.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      versions: ${{ steps.check.outputs.versions }}
+    env:
+      REGISTRY: ${{ vars.REGISTRY || 'narel/php' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY_HOST }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - id: check
+        run: |
+          outdated=()
+          for v in $(./build.sh --list); do
+            base=$(./build.sh --base "$v")
+            current=$(docker buildx imagetools inspect "$base" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+            if [ -z "$current" ]; then
+              echo "::warning::$v: cannot read base image $base, skipping"
+              continue
+            fi
+            # A single image gives its config, a multi-platform one a map
+            # of platform -> config.
+            recorded=$(docker buildx imagetools inspect "${REGISTRY}:${v}" --format '{{json .Image}}' 2>/dev/null \
+              | jq -r 'if has("config") then . else (to_entries[0].value // {}) end
+                       | .config.Labels["org.opencontainers.image.base.digest"] // empty' || true)
+            if [ "$current" = "$recorded" ]; then
+              echo "$v: up to date ($base)"
+            else
+              echo "$v: base image $base changed (${recorded:-none} -> $current)"
+              outdated+=("$v")
+            fi
+          done
+          echo "versions=${outdated[*]}" >> "$GITHUB_OUTPUT"
+          echo "### Outdated: ${outdated[*]:-none}" >> "$GITHUB_STEP_SUMMARY"
+
+  rebuild:
+    needs: check
+    if: needs.check.outputs.versions != ''
+    uses: ./.github/workflows/build.yml
+    with:
+      versions: ${{ needs.check.outputs.versions }}
+      push: true
+    secrets: inherit

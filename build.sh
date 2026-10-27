@@ -10,6 +10,11 @@
 #   NO_CACHE=1 ./build.sh 8.5     # no layer cache - use after security fixes
 #   BUILDER=oldbuilder ./build.sh 5.5     # build with the given buildx builder
 #   ./build.sh --list             # print the available versions and exit
+#   ./build.sh --base 8.5         # print the base image of a version and exit
+#
+# Every image gets the labels org.opencontainers.image.base.name and
+# org.opencontainers.image.base.digest. The scheduled rebuild workflow
+# compares that digest with the current one to find outdated images.
 #
 # --pull refreshes only the base image. If it has not changed, the apt-get
 # layer comes from the cache and new packages from the repository do NOT
@@ -71,6 +76,29 @@ find_entry() {
     echo "$VERSIONS" | grep -v '^[[:space:]]*$' | awk -F'|' -v v="$1" '$1 == v {print; exit}'
 }
 
+# Base image of a version: from the table, or from the FROM line of its
+# Dockerfile (legacy images and 7.4-mongodb1.18 use their own default).
+base_of() {
+    local entry ver dockerfile base rest from
+    entry="$(find_entry "$1")"
+    [ -n "$entry" ] || return 1
+    IFS='|' read -r ver dockerfile base rest <<<"$entry"
+    if [ -z "$base" ]; then
+        from="$(awk 'toupper($1) == "FROM" {print $2; exit}' "$dockerfile")"
+        if [[ "$from" == *'${BASE_IMAGE}'* ]]; then
+            base="$(sed -n 's/^ARG BASE_IMAGE=//p' "$dockerfile" | head -n1)"
+        else
+            base="$from"
+        fi
+    fi
+    echo "$base"
+}
+
+# Digest of the base image in its registry, empty if it cannot be read.
+base_digest() {
+    docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null || true
+}
+
 build_one() {
     local entry ver dockerfile base imap req opt tags repo
     entry="$(find_entry "$1")"
@@ -90,6 +118,12 @@ build_one() {
         args=(build)
     fi
     args+=(--file "$dockerfile" --tag "${REGISTRY}:${ver}")
+
+    local base_name base_dig
+    base_name="$(base_of "$ver")"
+    base_dig="$(base_digest "$base_name")"
+    args+=(--label "org.opencontainers.image.base.name=${base_name}")
+    [ -n "$base_dig" ] && args+=(--label "org.opencontainers.image.base.digest=${base_dig}")
     [ -z "$NO_PULL" ] && args+=(--pull)
     [ -n "$NO_CACHE" ] && args+=(--no-cache)
     [ -n "$PLATFORM" ] && args+=(--platform "$PLATFORM")
@@ -132,6 +166,11 @@ build_one() {
 
 if [ "${1:-}" = "--list" ]; then
     all_versions
+    exit 0
+fi
+
+if [ "${1:-}" = "--base" ]; then
+    base_of "${2:-}" || { echo "!! unknown version: ${2:-}" >&2; exit 1; }
     exit 0
 fi
 
