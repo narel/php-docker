@@ -1,0 +1,127 @@
+# ---------------------------------------------------------------------------
+# PHP 5.3 on Debian 6 (squeeze, archived). Apache 2.2 + mod_php.
+# Build with: ./build.sh 5.3
+# ---------------------------------------------------------------------------
+FROM sstrigler/squeeze:latest
+
+ENV PHP_SESSION_DIR=/var/lib/php5
+ENV PHP_CONFIG=/etc/php5
+
+COPY php5.3/sources.list /etc/apt/sources.list
+COPY php5.3/apt.conf     /etc/apt/apt.conf.d/00-general
+
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true LC_ALL=C; \
+    apt-get update; \
+    apt-get install -y apt-utils; \
+    apt-get install -y \
+        apache2 libapache2-mod-php5 \
+        php5 php5-common php5-cli php-pear \
+        php5-curl php5-gd php5-imagick php5-imap php5-intl php5-mcrypt \
+        php5-mysql php5-pgsql php5-pspell php5-sqlite php5-xmlrpc \
+        php5-auth-pam php5-geoip php5-xcache \
+        php5-memcache php5-memcached \
+        php-auth php-auth-sasl php-mail-mime php-mail-mimedecode \
+        php-mdb2 php-mdb2-driver-pgsql \
+        php-net-sieve php-net-smtp php-net-socket \
+        ssl-cert ca-certificates apt-transport-https curl \
+        cabextract libxrender1 locales zip unzip rar unrar \
+        ssmtp \
+        g++ make php5-dev; \
+    localedef -i pl_PL -c -f UTF-8 -A /usr/share/locale/locale.alias pl_PL.UTF-8; \
+    localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8; \
+    mkdir -p /var/www/html; \
+    # On some distributions (e.g. trusty/mcrypt) a package installs its ini
+    # into mods-available but does not enable it - enable everything installed.
+    if command -v php5enmod >/dev/null 2>&1; then \
+        for ini in /etc/php5/mods-available/*.ini; do \
+            [ -e "$ini" ] || continue; \
+            php5enmod "$(basename "$ini" .ini)" 2>/dev/null || true; \
+        done; \
+    fi; \
+    # --- one conf.d for all SAPIs ------------------------------------------
+    # NOTE: in PHP 5 the symlinks in conf.d are RELATIVE (../../mods-available/*.ini),
+    # so this directory must not be moved - the other paths have to point to it,
+    # otherwise all extensions disappear.
+    if [ -d /etc/php5/apache2/conf.d ] && [ ! -L /etc/php5/apache2/conf.d ]; then \
+        canon=/etc/php5/apache2/conf.d; \
+    elif [ -d /etc/php5/conf.d ] && [ ! -L /etc/php5/conf.d ]; then \
+        canon=/etc/php5/conf.d; \
+    else \
+        mkdir -p /etc/php5/conf.d; canon=/etc/php5/conf.d; \
+    fi; \
+    for p in /etc/php5/conf.d /etc/php5/apache2/conf.d /etc/php5/cli/conf.d \
+             /etc/php5/cgi/conf.d /etc/php5/fpm/conf.d; do \
+        [ "$p" = "$canon" ] && continue; \
+        [ -d "$(dirname "$p")" ] || continue; \
+        rm -rf "$p"; \
+        ln -sfn "$canon" "$p"; \
+    done; \
+    apt-get remove --purge -y g++ make gcc php5-dev; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
+    for name in curl gd mysqli imagick mcrypt; do \
+        php -m | grep -qix "$name" \
+            || { echo "ERROR: extension $name is not loaded"; exit 1; }; \
+    done; \
+    php -m
+
+COPY common/apache2.2.conf              /etc/apache2/apache2.conf
+COPY common/php.conf                    /etc/php5/conf.d/90-docker.ini
+COPY common/imagemagick-policy.xml      /usr/local/share/imagemagick-policy.xml
+COPY run.sh                             /run.sh
+COPY index.php                          /var/www/html/index.php
+
+# --- defaults (must come before apache2ctl -t below:
+#     Apache refuses to start when a ${...} variable is undefined)
+ENV TZ=Europe/Warsaw
+ENV DOCUMENT_ROOT=/var/www/html
+ENV APACHE_UID=1000
+ENV APACHE_GID=1000
+ENV APACHE_SERVER_NAME=localhost
+ENV APACHE_OPTIONS="-Indexes +FollowSymLinks"
+ENV APACHE_TRUSTED_PROXIES="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1"
+ENV APACHE_START_SERVERS=2
+ENV APACHE_MIN_SPARE=2
+ENV APACHE_MAX_SPARE=5
+ENV APACHE_MAX_WORKERS=32
+# no fixes for CVE-2026-109618/109619 - every request runs in a fresh process (see README)
+ENV APACHE_MAX_REQUESTS_PER_CHILD=1
+ENV APACHE_KEEPALIVE=Off
+
+ENV LC_ALL=pl_PL.UTF-8
+ENV LC_MESSAGES=en_US.UTF-8
+
+ENV SSMTP=true
+ENV SSMTP_DOMAIN=example.com
+ENV SSMTP_MAILHUB=192.168.0.1
+
+RUN set -eux; \
+    a2enmod php5 actions rewrite expires setenvif; \
+    a2dismod status 2>/dev/null || true; \
+    chmod 755 /run.sh; \
+    # the distribution default page beats index.php in DirectoryIndex
+    rm -f /var/www/html/index.html; \
+    # harden ImageMagick only where the distribution did not
+    for d in /etc/ImageMagick /etc/ImageMagick-6 /etc/ImageMagick-7; do \
+        [ -d "$d" ] || continue; \
+        if ! grep -q 'pattern="PDF"' "$d/policy.xml" 2>/dev/null; then \
+            cp /usr/local/share/imagemagick-policy.xml "$d/policy.xml"; \
+        fi; \
+    done; \
+    mkdir -p ${PHP_SESSION_DIR}/sessions; \
+    chown www-data: ${PHP_SESSION_DIR} ${PHP_SESSION_DIR}/sessions; \
+    chmod 1770 ${PHP_SESSION_DIR}/sessions; \
+    apache2ctl -t
+
+EXPOSE 8000
+
+# SIGWINCH = graceful-stop: in-flight requests finish instead of being cut off
+STOPSIGNAL SIGWINCH
+
+# no -f: a 403/404 also means "Apache is alive", only no response counts as failure
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -s -o /dev/null --max-time 4 http://127.0.0.1:8000/ || exit 1
+
+ENTRYPOINT ["/run.sh"]
+CMD ["/usr/sbin/apache2", "-k", "start", "-DFOREGROUND"]

@@ -1,0 +1,138 @@
+# ---------------------------------------------------------------------------
+# PHP 5.4 on Debian 7 (wheezy, archived). Apache 2.2 + mod_php.
+# Build with: ./build.sh 5.4
+# ---------------------------------------------------------------------------
+FROM debian:wheezy
+
+ENV PHP_SESSION_DIR=/var/lib/php5
+ENV PHP_CONFIG=/etc/php5
+
+COPY pecl/mongodb-1.2.9.tgz pecl/rar-4.2.0.tgz /tmp/pecl/
+
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true; \
+    echo "deb http://archive.debian.org/debian/ wheezy main contrib non-free" > /etc/apt/sources.list; \
+    echo "deb http://archive.debian.org/debian-security/ wheezy/updates main contrib non-free" >> /etc/apt/sources.list; \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/00-archive; \
+    apt-get update; \
+    apt-get install --no-install-recommends -y --force-yes \
+        apache2 libapache2-mod-php5 \
+        php5 php5-cli php5-cgi php5-common php-pear \
+        php5-curl php5-gd php5-imagick php5-imap php5-intl php5-mcrypt \
+        php5-mysql php5-pgsql php5-sqlite \
+        php-db php-xml-dtd php-xml-parser php-xml-rpc \
+        ca-certificates curl \
+        cabextract imagemagick libgd-tools libxrender1 rar unrar \
+        ssmtp \
+        g++ make libssl-dev libcurl4-openssl-dev pkg-config libpcre3 libpcre3-dev php5-dev; \
+    # On some distributions (e.g. trusty/mcrypt) a package installs its ini
+    # into mods-available but does not enable it - enable everything installed.
+    if command -v php5enmod >/dev/null 2>&1; then \
+        for ini in /etc/php5/mods-available/*.ini; do \
+            [ -e "$ini" ] || continue; \
+            mod="$(basename "$ini" .ini)"; \
+            # wheezy enables pdo as 10-pdo.ini; a second 20-pdo.ini from php5enmod
+            # caused "Module 'PDO' already loaded" on every PHP start-up
+            ls /etc/php5/conf.d/*-"$mod".ini >/dev/null 2>&1 && continue; \
+            php5enmod "$mod" 2>/dev/null || true; \
+        done; \
+    fi; \
+    # --- one conf.d for all SAPIs ------------------------------------------
+    # NOTE: in PHP 5 the symlinks in conf.d are RELATIVE (../../mods-available/*.ini),
+    # so this directory must not be moved - the other paths have to point to it,
+    # otherwise all extensions disappear.
+    if [ -d /etc/php5/apache2/conf.d ] && [ ! -L /etc/php5/apache2/conf.d ]; then \
+        canon=/etc/php5/apache2/conf.d; \
+    elif [ -d /etc/php5/conf.d ] && [ ! -L /etc/php5/conf.d ]; then \
+        canon=/etc/php5/conf.d; \
+    else \
+        mkdir -p /etc/php5/conf.d; canon=/etc/php5/conf.d; \
+    fi; \
+    for p in /etc/php5/conf.d /etc/php5/apache2/conf.d /etc/php5/cli/conf.d \
+             /etc/php5/cgi/conf.d /etc/php5/fpm/conf.d; do \
+        [ "$p" = "$canon" ] && continue; \
+        [ -d "$(dirname "$p")" ] || continue; \
+        rm -rf "$p"; \
+        ln -sfn "$canon" "$p"; \
+    done; \
+    ext_dir="$(php -r 'echo ini_get("extension_dir");')"; \
+    # Tarballs from pecl/ in the repository, not from the network: PEAR fails at
+    # random against the pecl.php.net REST API, and a swallowed error produced
+    # images without mongodb (this happened to 5 and 5.5).
+    pecl install /tmp/pecl/mongodb-1.2.9.tgz; \
+    pecl install /tmp/pecl/rar-4.2.0.tgz || echo "WARNING: rar failed to build - skipping"; \
+    for name in mongodb rar; do \
+        if [ -f "${ext_dir}/${name}.so" ]; then \
+            echo "extension=${name}.so" > /etc/php5/conf.d/30-${name}.ini; \
+            echo "installed: ${name}"; \
+        else \
+            echo "skipped (no .so): ${name}"; \
+        fi; \
+    done; \
+    apt-get purge --auto-remove -y g++ make libssl-dev libcurl4-openssl-dev \
+        pkg-config libpcre3-dev php5-dev 2>/dev/null \
+        || apt-get remove --purge -y g++ make gcc php5-dev; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
+    for name in curl gd mysqli imagick mcrypt mongodb; do \
+        php -m | grep -qix "$name" \
+            || { echo "ERROR: extension $name is not loaded"; exit 1; }; \
+    done; \
+    php -m
+
+COPY common/apache2.2.conf              /etc/apache2/apache2.conf
+COPY common/php.conf                    /etc/php5/conf.d/90-docker.ini
+COPY common/imagemagick-policy.xml      /usr/local/share/imagemagick-policy.xml
+COPY run.sh                             /run.sh
+COPY index.php                          /var/www/html/index.php
+
+# --- defaults (must come before apache2ctl -t below:
+#     Apache refuses to start when a ${...} variable is undefined)
+ENV TZ=Europe/Warsaw
+ENV DOCUMENT_ROOT=/var/www/html
+ENV APACHE_UID=1000
+ENV APACHE_GID=1000
+ENV APACHE_SERVER_NAME=localhost
+ENV APACHE_OPTIONS="-Indexes +FollowSymLinks"
+ENV APACHE_TRUSTED_PROXIES="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1"
+ENV APACHE_START_SERVERS=2
+ENV APACHE_MIN_SPARE=2
+ENV APACHE_MAX_SPARE=5
+ENV APACHE_MAX_WORKERS=32
+# no fixes for CVE-2026-109618/109619 - every request runs in a fresh process (see README)
+ENV APACHE_MAX_REQUESTS_PER_CHILD=1
+ENV APACHE_KEEPALIVE=Off
+
+ENV SSMTP=true
+ENV SSMTP_DOMAIN=example.com
+ENV SSMTP_MAILHUB=192.168.0.1
+
+RUN set -eux; \
+    a2enmod php5 actions rewrite expires setenvif; \
+    a2dismod status 2>/dev/null || true; \
+    chmod 755 /run.sh; \
+    # the distribution default page beats index.php in DirectoryIndex
+    rm -f /var/www/html/index.html; \
+    # harden ImageMagick only where the distribution did not
+    for d in /etc/ImageMagick /etc/ImageMagick-6 /etc/ImageMagick-7; do \
+        [ -d "$d" ] || continue; \
+        if ! grep -q 'pattern="PDF"' "$d/policy.xml" 2>/dev/null; then \
+            cp /usr/local/share/imagemagick-policy.xml "$d/policy.xml"; \
+        fi; \
+    done; \
+    mkdir -p ${PHP_SESSION_DIR}/sessions; \
+    chown www-data: ${PHP_SESSION_DIR} ${PHP_SESSION_DIR}/sessions; \
+    chmod 1770 ${PHP_SESSION_DIR}/sessions; \
+    apache2ctl -t
+
+EXPOSE 8000
+
+# SIGWINCH = graceful-stop: in-flight requests finish instead of being cut off
+STOPSIGNAL SIGWINCH
+
+# no -f: a 403/404 also means "Apache is alive", only no response counts as failure
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -s -o /dev/null --max-time 4 http://127.0.0.1:8000/ || exit 1
+
+ENTRYPOINT ["/run.sh"]
+CMD ["/usr/sbin/apache2", "-k", "start", "-DFOREGROUND"]

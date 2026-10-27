@@ -1,0 +1,268 @@
+# ---------------------------------------------------------------------------
+# PHP 7.4 (Apache + mod_php) with mongodb 1.18.0 instead of the default 1.20.1.
+#
+# A copy of the shared Dockerfile - only the default ARGs below differ, so
+# that `diff Dockerfile Dockerfile.php7.4-mongodb1.18` shows nothing else.
+# Changes to the shared Dockerfile have to be ported here by hand.
+#
+#   ./build.sh 7.4-mongodb1.18
+# ---------------------------------------------------------------------------
+ARG BASE_IMAGE=debian:trixie
+FROM ${BASE_IMAGE}
+
+ARG PHP_VER=7.4
+# Where PHP comes from: empty = distribution, sury = packages.sury.org (Debian only).
+# 7.4 and 5.6 use Sury, the only free source of fixes for CVE-2026-109618/109619.
+ARG PHP_REPO=sury
+# PECL extensions that MUST build, or the build fails (format: name-version).
+ARG PECL_REQUIRED="mongodb-1.18.0"
+# Extensions that may fail to build - a warning only.
+ARG PECL_OPTIONAL="rar-4.2.0"
+# CFLAGS for PECL builds; empty = configure defaults (-g -O2).
+ARG PECL_CFLAGS=""
+# Where ext-imap comes from. Since PHP 8.4 imap is no longer part of PHP core,
+# and the c-client library it depends on is dead and being dropped by distributions:
+#   apt  - php-imap package from apt (distribution or Sury)
+#   pecl - built from PECL against the distribution's libc-client; Debian trixie
+#          no longer ships it, so there libc-client comes from bookworm
+#   none - no imap
+ARG IMAP=apt
+ARG IMAP_PECL=imap-1.0.3
+ARG EXTRA_PACKAGES=""
+# Libraries from pear.php.net (format: name-version) - for legacy applications
+# that need them when the distribution no longer ships them.
+ARG PEAR_PACKAGES=""
+ARG APACHE_EXTRA_MODS=""
+ARG TZ=Europe/Warsaw
+# build.sh sets Off / 1 for 7.0/7.2: no fixes for CVE-2026-109618/109619, so
+# every request runs in a fresh process (see README)
+ARG APACHE_KEEPALIVE=On
+ARG APACHE_MAX_REQUESTS_PER_CHILD=500
+
+ENV PHP_VER=${PHP_VER}
+ENV PHP_CONFIG=/etc/php/${PHP_VER}
+ENV PHP_SESSION_DIR=/var/lib/php
+
+# --- 1. packages -----------------------------------------------------------
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true; \
+    # rar/unrar live in contrib/non-free on Debian; on Ubuntu they are in
+    # multiverse, which is enabled by default - then this is a no-op.
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
+            /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ] && grep -q '\.debian\.org' /etc/apt/sources.list; then \
+        sed -i 's/ main$/ main contrib non-free/' /etc/apt/sources.list; \
+    fi; \
+    # At Sury "php-gd" etc. means the newest PHP, not ${PHP_VER} - hence the version in the name
+    p=php; \
+    [ "${PHP_REPO}" = sury ] && p="php${PHP_VER}"; \
+    case "${IMAP}" in \
+        apt)  imap_pkgs="${p}-imap" ;; \
+        # libc-client2007e explicitly, so that purging -dev below keeps the runtime
+        pecl) imap_pkgs="libc-client2007e libc-client2007e-dev libkrb5-dev" ;; \
+        none) imap_pkgs="" ;; \
+        *)    echo "ERROR: IMAP=${IMAP} - allowed: apt, pecl, none"; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    # the base image can be weeks old - without this its packages (libc,
+    # systemd, xz...) miss security fixes
+    apt-get upgrade -y; \
+    # The Sury source stays in the image: derived images install php7.4-* from it,
+    # and a rebuild picks up new fixes. The key comes as a package so apt renews it.
+    if [ "${PHP_REPO}" = sury ]; then \
+        apt-get install --no-install-recommends -y ca-certificates curl; \
+        curl -fsSL --retry 3 -o /tmp/sury-keyring.deb \
+            https://packages.sury.org/debsuryorg-archive-keyring.deb; \
+        dpkg -i /tmp/sury-keyring.deb; \
+        rm -f /tmp/sury-keyring.deb; \
+        . /etc/os-release; \
+        printf '%s\n' 'Types: deb' 'URIs: https://packages.sury.org/php/' \
+            "Suites: ${VERSION_CODENAME}" 'Components: main' \
+            'Signed-By: /usr/share/keyrings/debsuryorg-archive-keyring.gpg' \
+            > /etc/apt/sources.list.d/sury-php.sources; \
+        apt-get update; \
+    elif [ -n "${PHP_REPO}" ]; then \
+        echo "ERROR: PHP_REPO=${PHP_REPO} - allowed: empty, sury"; exit 1; \
+    fi; \
+    # Debian trixie dropped c-client - take it from bookworm. The pin lets in
+    # only these three packages from bookworm. The source is removed after
+    # installation, so apt-get update in derived images does not depend on bookworm.
+    if [ "${IMAP}" = pecl ] && [ -f /etc/apt/sources.list.d/debian.sources ] \
+       && ! apt-cache show libc-client2007e >/dev/null 2>&1; then \
+        printf '%s\n' 'Types: deb' 'URIs: http://deb.debian.org/debian' \
+            'Suites: bookworm' 'Components: main' \
+            'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
+            > /etc/apt/sources.list.d/bookworm-c-client.sources; \
+        printf '%s\n' 'Package: libc-client2007e libc-client2007e-dev mlock' \
+            'Pin: release n=bookworm' 'Pin-Priority: 500' '' \
+            'Package: *' 'Pin: release n=bookworm' 'Pin-Priority: -1' \
+            > /etc/apt/preferences.d/bookworm-c-client; \
+        apt-get update; \
+    fi; \
+    apt-get install --no-install-recommends -y \
+        apache2 libapache2-mod-php${PHP_VER} \
+        ${p} ${p}-cli ${p}-cgi php-common php-pear \
+        ${p}-bcmath ${p}-curl php-db ${p}-gd ${p}-gmp ${p}-imagick \
+        ${p}-intl ${p}-mbstring ${p}-mysql ${p}-pgsql ${p}-redis ${p}-soap \
+        ${p}-sqlite3 ${p}-xml ${p}-zip \
+        ${imap_pkgs} \
+        ca-certificates curl \
+        cabextract imagemagick iputils-ping libgd-tools libxrender1 \
+        rar unrar webp \
+        ssmtp \
+        ${EXTRA_PACKAGES} \
+        # build-only dependencies for PECL extensions - removed below
+        g++ make libssl-dev pkg-config php${PHP_VER}-dev; \
+    # a second PHP version would take over /usr/bin/php and pecl would build against it
+    [ "$(ls /etc/php)" = "${PHP_VER}" ] \
+        || { echo "ERROR: /etc/php contains more than ${PHP_VER}: $(ls /etc/php)"; exit 1; }; \
+    rm -f /etc/apt/sources.list.d/bookworm-c-client.sources \
+          /etc/apt/preferences.d/bookworm-c-client; \
+    echo "${TZ}" > /etc/timezone; \
+    dpkg-reconfigure -f noninteractive tzdata; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- 2. one conf.d for all SAPIs -------------------------------------------
+# This way `php -v` on the CLI sees exactly the same extensions as Apache.
+# The canonical directory stays in place; the other paths are symlinks to it.
+# Moving it is dangerous: in some PHP versions the symlinks inside are RELATIVE
+# (../../mods-available/*.ini), and after a move all extensions disappear.
+RUN set -eux; \
+    canon="${PHP_CONFIG}/apache2/conf.d"; \
+    for p in "${PHP_CONFIG}/conf.d" "${PHP_CONFIG}/cli/conf.d" \
+             "${PHP_CONFIG}/cgi/conf.d" "${PHP_CONFIG}/fpm/conf.d" \
+             "${PHP_CONFIG}/phpdbg/conf.d"; do \
+        [ "$p" = "$canon" ] && continue; \
+        [ -d "$(dirname "$p")" ] || continue; \
+        rm -rf "$p"; \
+        ln -sfn "$canon" "$p"; \
+    done
+
+# --- 3. PECL extensions ----------------------------------------------------
+# An extension= line is written ONLY when the .so file actually exists.
+# Previously 7.2/7.4 had extension=mongodb.so without mongodb, and 8.1 had
+# extension=rar.so without rar - a PHP warning on every request.
+#
+# curl downloads the tarballs and pecl installs them from the file. PEAR (every
+# version, 1.10.16 included) speaks HTTP/1.1 but does not decode
+# Transfer-Encoding: chunked, which the pecl.php.net CDN sometimes sends - hence
+# random "does not have REST xml available" errors. Installing from a file
+# makes no REST requests at all.
+RUN set -eux; \
+    ext_dir="$(php -r 'echo ini_get("extension_dir");')"; \
+    build_deps="g++ make libssl-dev pkg-config php${PHP_VER}-dev"; \
+    pecl_fetch() { curl -fsSL --retry 3 -o "/tmp/$1.tgz" "https://pecl.php.net/get/$1.tgz"; }; \
+    # only when non-empty: an empty CFLAGS in the environment drops -O2 from configure
+    if [ -n "${PECL_CFLAGS}" ]; then export CFLAGS="${PECL_CFLAGS}"; fi; \
+    if [ "${IMAP}" = pecl ]; then \
+        pecl_fetch "${IMAP_PECL}"; \
+        # without these options pecl builds imap without SSL and imaps:// does not work
+        pecl install --configureoptions 'with-kerberos="yes" with-imap-ssl="yes"' "/tmp/${IMAP_PECL}.tgz"; \
+        echo "extension=imap.so" > "${PHP_CONFIG}/conf.d/20-imap.ini"; \
+        build_deps="${build_deps} libc-client2007e-dev libkrb5-dev"; \
+    fi; \
+    for spec in ${PECL_REQUIRED}; do \
+        pecl_fetch "$spec"; \
+        pecl install "/tmp/$spec.tgz"; \
+    done; \
+    for spec in ${PECL_OPTIONAL}; do \
+        { pecl_fetch "$spec" && pecl install "/tmp/$spec.tgz"; } \
+            || echo "WARNING: optional extension ${spec} failed to build - skipping"; \
+    done; \
+    for spec in ${PEAR_PACKAGES}; do \
+        curl -fsSL --retry 3 -o "/tmp/$spec.tgz" "https://pear.php.net/get/$spec.tgz"; \
+        pear install "/tmp/$spec.tgz"; \
+        # pear's exit code does not always tell the truth
+        pear list | grep -q "^${spec%-*} " \
+            || { echo "ERROR: PEAR library ${spec} was not installed"; exit 1; }; \
+    done; \
+    for spec in ${PECL_REQUIRED} ${PECL_OPTIONAL}; do \
+        name="${spec%%-*}"; \
+        if [ -f "${ext_dir}/${name}.so" ]; then \
+            echo "extension=${name}.so" > "${PHP_CONFIG}/conf.d/30-${name}.ini"; \
+            echo "installed: ${name}"; \
+        else \
+            echo "skipped (no .so): ${name}"; \
+        fi; \
+    done; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get purge --auto-remove -y ${build_deps}; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/man/?? /usr/share/man/??_*; \
+    # verify AFTER removing the build tools - otherwise a regression slips through silently
+    required="${PECL_REQUIRED} curl gd mysqli imagick"; \
+    [ "${IMAP}" = none ] || required="${required} imap"; \
+    for name in ${required}; do \
+        name="${name%%-*}"; \
+        php -m | grep -qix "${name}" \
+            || { echo "ERROR: extension ${name} is not loaded"; exit 1; }; \
+    done; \
+    php -m
+
+# --- 4. configuration ------------------------------------------------------
+COPY common/apache2.conf        /etc/apache2/apache2.conf
+COPY common/mpm_prefork.conf    /etc/apache2/mods-available/mpm_prefork.conf
+COPY common/php.conf            ${PHP_CONFIG}/conf.d/90-docker.ini
+COPY common/imagemagick-policy.xml /usr/local/share/imagemagick-policy.xml
+COPY run.sh                     /run.sh
+COPY index.php                  /var/www/html/index.php
+
+# --- 5. defaults (must come before apache2ctl -t below:
+#        Apache refuses to start when a ${...} variable is undefined) -----------
+ENV TZ=${TZ}
+ENV DOCUMENT_ROOT=/var/www/html
+ENV APACHE_UID=1000
+ENV APACHE_GID=1000
+ENV APACHE_SERVER_NAME=localhost
+ENV APACHE_OPTIONS="-Indexes +FollowSymLinks"
+ENV APACHE_TRUSTED_PROXIES="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1"
+ENV APACHE_START_SERVERS=2
+ENV APACHE_MIN_SPARE=2
+ENV APACHE_MAX_SPARE=5
+ENV APACHE_MAX_WORKERS=32
+ENV APACHE_MAX_REQUESTS_PER_CHILD=${APACHE_MAX_REQUESTS_PER_CHILD}
+ENV APACHE_KEEPALIVE=${APACHE_KEEPALIVE}
+
+ENV SSMTP=true
+ENV SSMTP_DOMAIN=example.com
+ENV SSMTP_MAILHUB=192.168.0.1
+
+RUN set -eux; \
+    a2dismod mpm_event mpm_worker 2>/dev/null || true; \
+    a2enmod mpm_prefork php${PHP_VER} actions rewrite expires setenvif ${APACHE_EXTRA_MODS}; \
+    a2enmod remoteip || echo "WARNING: no mod_remoteip - REMOTE_ADDR will stay the proxy address"; \
+    # mod_status is not used, and /server-status is one config change away
+    # from being public
+    a2dismod status 2>/dev/null || true; \
+    chmod 755 /run.sh; \
+    # the Debian/Ubuntu default page beats index.php in DirectoryIndex
+    # and reveals the distribution
+    rm -f /var/www/html/index.html; \
+    # harden ImageMagick only where the distribution did not
+    for d in /etc/ImageMagick /etc/ImageMagick-6 /etc/ImageMagick-7; do \
+        [ -d "$d" ] || continue; \
+        if ! grep -q 'pattern="PDF"' "$d/policy.xml" 2>/dev/null; then \
+            cp /usr/local/share/imagemagick-policy.xml "$d/policy.xml"; \
+            echo "installed custom ImageMagick policy in $d"; \
+        else \
+            echo "$d already has a hardened policy - keeping it"; \
+        fi; \
+    done; \
+    mkdir -p ${PHP_SESSION_DIR}/sessions; \
+    chown www-data: ${PHP_SESSION_DIR} ${PHP_SESSION_DIR}/sessions; \
+    chmod 1770 ${PHP_SESSION_DIR}/sessions; \
+    mkdir -p /etc/apache2/conf.d; \
+    apache2ctl -t
+
+EXPOSE 8000
+
+# SIGWINCH = graceful-stop: in-flight requests finish instead of being cut off
+STOPSIGNAL SIGWINCH
+
+# no -f: a 403/404 also means "Apache is alive", only no response counts as failure
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -s -o /dev/null --max-time 4 http://127.0.0.1:8000/ || exit 1
+
+ENTRYPOINT ["/run.sh"]
+CMD ["/usr/sbin/apache2", "-k", "start", "-DFOREGROUND"]

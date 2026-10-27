@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policymap [
+<!ELEMENT policymap (policy)*>
+<!ATTLIST policymap xmlns CDATA #FIXED ''>
+<!ELEMENT policy EMPTY>
+<!ATTLIST policy xmlns CDATA #FIXED '' domain NMTOKEN #REQUIRED
+  name NMTOKEN #IMPLIED pattern CDATA #IMPLIED rights NMTOKEN #IMPLIED
+  stealth NMTOKEN #IMPLIED value CDATA #IMPLIED>
+]>
+<!--
+  Hardened ImageMagick policy for old distributions that shipped a permissive
+  default policy.xml (ImageTragick / CVE-2016-3714 and related issues).
+  Installed conditionally - only when the existing policy does not already
+  block PDF.
+
+  To unblock something (most often: PDF or SVG thumbnails), remove the
+  matching coder entry and - for PDF/PS - the delegate entry as well.
+-->
+<policymap>
+  <!-- no external delegates (ghostscript, ffmpeg, curl...) -->
+  <policy domain="delegate" rights="none" pattern="*" />
+
+  <!-- coders that lead to RCE, file disclosure or SSRF -->
+  <policy domain="coder" rights="none" pattern="PS" />
+  <policy domain="coder" rights="none" pattern="PS2" />
+  <policy domain="coder" rights="none" pattern="PS3" />
+  <policy domain="coder" rights="none" pattern="EPS" />
+  <policy domain="coder" rights="none" pattern="PDF" />
+  <policy domain="coder" rights="none" pattern="XPS" />
+  <policy domain="coder" rights="none" pattern="EPT" />
+  <policy domain="coder" rights="none" pattern="MSL" />
+  <policy domain="coder" rights="none" pattern="MVG" />
+  <policy domain="coder" rights="none" pattern="SVG" />
+  <policy domain="coder" rights="none" pattern="TEXT" />
+  <policy domain="coder" rights="none" pattern="SHOW" />
+  <policy domain="coder" rights="none" pattern="WIN" />
+  <policy domain="coder" rights="none" pattern="PLT" />
+  <policy domain="coder" rights="none" pattern="URL" />
+  <policy domain="coder" rights="none" pattern="HTTP" />
+  <policy domain="coder" rights="none" pattern="HTTPS" />
+  <policy domain="coder" rights="none" pattern="FTP" />
+  <policy domain="coder" rights="none" pattern="LABEL" />
+
+  <!-- @file = indirect reads of files from disk -->
+  <policy domain="path" rights="none" pattern="@*" />
+
+  <!-- limits against decompression bombs -->
+  <policy domain="resource" name="memory" value="256MiB" />
+  <policy domain="resource" name="map" value="512MiB" />
+  <policy domain="resource" name="width" value="16KP" />
+  <policy domain="resource" name="height" value="16KP" />
+  <policy domain="resource" name="area" value="128MP" />
+  <policy domain="resource" name="disk" value="1GiB" />
+  <policy domain="resource" name="time" value="60" />
+</policymap>

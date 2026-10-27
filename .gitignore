@@ -1,0 +1,14 @@
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Image archives (docker save)
+*.tar
+*.tar.gz
+
+# Local overrides
+.env
+*.local
