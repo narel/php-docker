@@ -1,0 +1,103 @@
+name: Build images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile*"
+      - "build.sh"
+      - "common/**"
+      - "pecl/**"
+      - "php5.3/**"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "Dockerfile*"
+      - "build.sh"
+      - "common/**"
+      - "pecl/**"
+      - "php5.3/**"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "Versions to build, space separated (empty = all)"
+        required: false
+        default: ""
+      push:
+        description: "Push images to the registry"
+        type: boolean
+        default: false
+      no_cache:
+        description: "Build without layer cache (use after security fixes)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  versions:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        env:
+          VERSIONS: ${{ inputs.versions }}
+        run: |
+          if [ -n "${VERSIONS// }" ]; then
+            list=$(printf '%s\n' $VERSIONS)
+          else
+            list=$(./build.sh --list)
+          fi
+          echo "matrix=$(printf '%s\n' "$list" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: versions
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.versions.outputs.matrix) }}
+    name: PHP ${{ matrix.version }}
+    env:
+      # Image name with the registry host, e.g. registry.example.com/php.
+      # Without a host it is Docker Hub (narel/php).
+      REGISTRY: ${{ vars.REGISTRY || 'narel/php' }}
+      PUSH: ${{ github.event_name == 'workflow_dispatch' && inputs.push && '1' || '' }}
+      NO_CACHE: ${{ inputs.no_cache && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The default BuildKit hangs on apt from the jessie/wheezy era, so the
+      # legacy 5.x images use an older BuildKit (see README, "Building").
+      - name: Set up old BuildKit for PHP 5.2 - 5.5
+        if: contains(fromJSON('["5.5","5.4","5.3","5.2"]'), matrix.version)
+        run: |
+          docker buildx create --name oldbuilder --driver docker-container \
+              --driver-opt image=moby/buildkit:v0.12.5
+          echo "BUILDER=oldbuilder" >> "$GITHUB_ENV"
+          echo "PLATFORM=linux/amd64" >> "$GITHUB_ENV"
+
+      # REGISTRY_HOST empty = Docker Hub. For your own registry set it to
+      # the host, e.g. registry.example.com or registry.example.com:5000.
+      - name: Log in to the registry
+        if: env.PUSH == '1'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY_HOST }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build
+        run: ./build.sh "${{ matrix.version }}"
+
+      - name: Smoke test
+        run: |
+          docker run --rm --entrypoint php "${REGISTRY}:${{ matrix.version }}" -v

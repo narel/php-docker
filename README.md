@@ -157,6 +157,30 @@ The full set of 13 images takes about 9 GB, plus a layer cache that grows to
 several GB. `docker builder prune -f` frees the cache only and **does not touch
 images**. `docker system prune` can delete finished images.
 
+### GitHub Actions
+
+`.github/workflows/build.yml` builds every version in a separate job, in
+parallel. It runs on pushes to `main` and on pull requests that touch the
+Dockerfiles, `build.sh`, `common/`, `pecl/` or `php5.3/`. Only build, no push.
+
+To build and push by hand: **Actions → Build images → Run workflow**. Inputs:
+
+- `versions`: space separated, for example `8.5 7.4` (empty = all)
+- `push`: push to the registry (see below)
+- `no_cache`: build without layer cache, after security fixes
+
+Pushing is configured in **Settings → Secrets and variables → Actions**:
+
+| Name | Kind | Example | Meaning |
+|------|------|---------|---------|
+| `REGISTRY` | variable | `registry.example.com/php` | image name, with the registry host; default `narel/php` (Docker Hub) |
+| `REGISTRY_HOST` | variable | `registry.example.com` | host to log in to; empty = Docker Hub |
+| `REGISTRY_USERNAME` | secret | `ci-bot` | registry user |
+| `REGISTRY_PASSWORD` | secret | | password or access token |
+
+The registry must be reachable from GitHub-hosted runners, over HTTPS with a
+publicly trusted certificate.
+
 ---
 
 ## Running

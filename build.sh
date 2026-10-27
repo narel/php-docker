@@ -9,6 +9,7 @@
 #   NO_PULL=1 ./build.sh 8.2      # do not refresh the base image
 #   NO_CACHE=1 ./build.sh 8.5     # no layer cache - use after security fixes
 #   BUILDER=oldbuilder ./build.sh 5.5     # build with the given buildx builder
+#   ./build.sh --list             # print the available versions and exit
 #
 # --pull refreshes only the base image. If it has not changed, the apt-get
 # layer comes from the cache and new packages from the repository do NOT
@@ -128,6 +129,11 @@ build_one() {
         done
     fi
 }
+
+if [ "${1:-}" = "--list" ]; then
+    all_versions
+    exit 0
+fi
 
 if [ "$#" -gt 0 ]; then
     targets=("$@")
