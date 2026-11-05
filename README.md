@@ -181,6 +181,20 @@ Pushing is configured in **Settings → Secrets and variables → Actions**:
 The registry must be reachable from GitHub-hosted runners, over HTTPS with a
 publicly trusted certificate.
 
+### Automatic rebuilds
+
+`.github/workflows/rebuild.yml` runs every day at 04:17 UTC (and on demand
+from the Actions tab). For every version it compares the digest of the base
+image (`ubuntu:26.04`, `debian:trixie`, …) with the digest recorded in the
+pushed image, in the `org.opencontainers.image.base.digest` label that
+`build.sh` sets. Only the versions whose base image changed are rebuilt and
+pushed. An image without the label is rebuilt once, which adds it.
+
+`./build.sh --base 8.5` prints the base image of a version.
+
+This catches new base images only. Security fixes that reach Debian, Ubuntu or
+Sury between base image releases still need a manual run with `no_cache`.
+
 ---
 
 ## Running
